@@ -38,6 +38,7 @@ const MenuPage = () => {
   const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isOutsideArea, setIsOutsideArea] = useState(false);
+  const [locationChecked, setLocationChecked] = useState(false);
   const [locationError, setLocationError] = useState('');
   const { toast } = useToast();
 
@@ -45,8 +46,10 @@ const MenuPage = () => {
 
   useEffect(() => {
     const init = async () => {
-      await checkLocationRestriction();
-      await fetchProducts();
+      await Promise.all([
+        checkLocationRestriction(),
+        fetchProducts()
+      ]);
       
       const params = new URLSearchParams(window.location.search);
       const mesaParam = params.get('mesa');
@@ -81,33 +84,61 @@ const MenuPage = () => {
 
       if (error) throw error;
 
-      if (data && data.restricao_ativa && data.latitude && data.longitude) {
-        if (!navigator.geolocation) {
-          setLocationError('Geolocalização não é suportada pelo seu navegador.');
-          setIsOutsideArea(true);
-          return;
-        }
-
-        navigator.geolocation.getCurrentPosition(
-          (position) => {
-            const userLat = position.coords.latitude;
-            const userLon = position.coords.longitude;
-            const distance = getDistanceInMeters(userLat, userLon, data.latitude, data.longitude);
-            
-            if (distance > (data.raio_metros || 100)) {
-              setIsOutsideArea(true);
-            }
-          },
-          (error) => {
-            console.error('Geolocation error:', error);
-            setLocationError('Por favor, permita o acesso à sua localização para fazer pedidos.');
-            setIsOutsideArea(true);
-          },
-          { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-        );
+      // Se não houver configurações ou restrição desativada, libera
+      if (!data || !data.restricao_ativa) {
+        setIsOutsideArea(false);
+        setLocationChecked(true);
+        return;
       }
+
+      // Se tiver restrição ativa mas sem coordenadas, libera (configuração incompleta)
+      if (!data.latitude || !data.longitude) {
+        setIsOutsideArea(false);
+        setLocationChecked(true);
+        return;
+      }
+
+      // Verifica geolocalização
+      if (!navigator.geolocation) {
+        setLocationError('Geolocalização não é suportada pelo seu navegador.');
+        setIsOutsideArea(true);
+        setLocationChecked(true);
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const userLat = position.coords.latitude;
+          const userLon = position.coords.longitude;
+          const distance = getDistanceInMeters(
+            userLat, 
+            userLon, 
+            data.latitude, 
+            data.longitude
+          );
+          
+          setIsOutsideArea(distance > (data.raio_metros || 100));
+          setLocationChecked(true);
+        },
+        (error) => {
+          console.error('Geolocation error:', error);
+          setLocationError(
+            error.code === 1 
+              ? 'Permissão negada. Permita o acesso à localização para fazer pedidos.'
+              : 'Erro ao obter localização. Tente novamente.'
+          );
+          setIsOutsideArea(true);
+          setLocationChecked(true);
+        },
+        { 
+          enableHighAccuracy: true, 
+          timeout: 10000, 
+          maximumAge: 0 
+        }
+      );
     } catch (error) {
       console.error('Error checking config:', error);
+      setLocationChecked(true);
     }
   };
 
@@ -139,7 +170,14 @@ const MenuPage = () => {
   };
 
   const addToCart = (product) => {
-    if (isOutsideArea) return;
+    if (isOutsideArea) {
+      toast({
+        title: "Fora da área de atendimento",
+        description: "Você não está no estabelecimento no momento.",
+        variant: "destructive"
+      });
+      return;
+    }
     
     const existingItem = cart.find(item => item.id === product.id);
     if (existingItem) {
@@ -180,7 +218,14 @@ const MenuPage = () => {
   };
 
   const handleInitiateCheckout = () => {
-    if (isOutsideArea) return;
+    if (isOutsideArea) {
+      toast({
+        title: "Fora da área de atendimento",
+        description: "Você não está no estabelecimento no momento.",
+        variant: "destructive"
+      });
+      return;
+    }
     if (!tableNumber) {
       toast({
         title: "Erro",
@@ -198,6 +243,18 @@ const MenuPage = () => {
     setCart([]);
   };
 
+  if (loading || !locationChecked) {
+    return (
+      <div className="min-h-screen bg-stone-50">
+        <Header />
+        <div className="container mx-auto px-4 py-8 text-center">
+          <div className="w-16 h-16 border-4 border-amber-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-stone-600 text-lg">Carregando...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       <Helmet>
@@ -212,9 +269,9 @@ const MenuPage = () => {
           {isOutsideArea && (
             <Alert variant="destructive" className="mb-6 bg-red-50 border-red-200 text-red-800">
               <MapPinOff className="h-5 w-5" />
-              <AlertTitle className="text-lg font-bold">Você está fora da área de atendimento</AlertTitle>
+              <AlertTitle className="text-lg font-bold">Fora da área de atendimento</AlertTitle>
               <AlertDescription>
-                {locationError || "Parece que você não está no estabelecimento. Os pedidos estão bloqueados no momento."}
+                {locationError || "Você não está no estabelecimento. Os pedidos estão bloqueados."}
               </AlertDescription>
             </Alert>
           )}
@@ -222,22 +279,39 @@ const MenuPage = () => {
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
             <div>
               {tableNumber ? (
-                <Badge variant="secondary" className="text-lg px-4 py-2 mb-2 cursor-pointer hover:bg-stone-200 transition-colors" onClick={() => setIsTableModalOpen(true)}>
+                <Badge 
+                  variant="secondary" 
+                  className="text-lg px-4 py-2 mb-2 cursor-pointer hover:bg-stone-200 transition-colors" 
+                  onClick={() => setIsTableModalOpen(true)}
+                >
                   Mesa {tableNumber} (Alterar)
                 </Badge>
               ) : (
-                <Badge variant="outline" className="text-lg px-4 py-2 mb-2 text-amber-600 border-amber-600">
-                  Mesa não identificada
+                <Badge 
+                  variant="outline" 
+                  className="text-lg px-4 py-2 mb-2 text-amber-600 border-amber-600 cursor-pointer hover:bg-amber-50 transition-colors"
+                  onClick={() => setIsTableModalOpen(true)}
+                >
+                  Identificar Mesa
                 </Badge>
               )}
               <h1 className="text-4xl font-bold text-stone-800">Nosso Cardápio</h1>
             </div>
             <div className="flex gap-3">
-              <Button onClick={() => setWaiterRequestOpen(true)} variant="outline" className="gap-2" disabled={!tableNumber || isOutsideArea}>
+              <Button 
+                onClick={() => setWaiterRequestOpen(true)} 
+                variant="outline" 
+                className="gap-2" 
+                disabled={!tableNumber || isOutsideArea}
+              >
                 <Bell className="w-5 h-5" />
                 <span className="hidden sm:inline">Chamar Garçom</span>
               </Button>
-              <Button onClick={() => setCartOpen(true)} className="gap-2 relative" disabled={!tableNumber || isOutsideArea}>
+              <Button 
+                onClick={() => setCartOpen(true)} 
+                className="gap-2 relative" 
+                disabled={!tableNumber || isOutsideArea}
+              >
                 <CartIcon className="w-5 h-5" />
                 <span className="hidden sm:inline">Carrinho</span>
                 {cart.length > 0 && (
@@ -249,92 +323,85 @@ const MenuPage = () => {
             </div>
           </div>
 
-          {loading ? (
-            <div className="text-center py-12">
-              <div className="w-16 h-16 border-4 border-amber-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-              <p className="text-stone-600 text-lg">Carregando cardápio...</p>
-            </div>
-          ) : (
-            <Tabs defaultValue="Todos" className="w-full">
-              <TabsList className="flex flex-wrap w-full justify-start mb-8 h-auto gap-2 bg-transparent">
-                {categories.map(category => (
-                  <TabsTrigger 
-                    key={category} 
-                    value={category}
-                    className="data-[state=active]:bg-amber-600 data-[state=active]:text-white bg-white border border-stone-200"
-                  >
-                    {category}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-
+          <Tabs defaultValue="Todos" className="w-full">
+            <TabsList className="flex flex-wrap w-full justify-start mb-8 h-auto gap-2 bg-transparent">
               {categories.map(category => (
-                <TabsContent key={category} value={category}>
-                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {products
-                      .filter(p => category === 'Todos' || p.category === category)
-                      .map(product => {
-                        const imageUrl = product.image_path 
-                          ? supabase.storage.from('product-images').getPublicUrl(product.image_path).data.publicUrl
-                          : 'https://images.unsplash.com/photo-1700952633119-fb79919833f6';
-                        
-                        return (
-                          <div
-                            key={product.id}
-                            className={`bg-white rounded-xl shadow-lg border border-stone-200 overflow-hidden transition-all flex flex-col ${isOutsideArea ? 'opacity-75 grayscale-[0.5]' : 'hover:shadow-xl'}`}
-                          >
-                            <div className="aspect-video bg-stone-200 overflow-hidden">
-                              <img
-                                src={imageUrl}
-                                alt={product.name}
-                                className="w-full h-full object-cover"
-                              />
-                            </div>
-                            <div className="p-4 flex flex-col flex-1">
-                              <div className="flex justify-between items-start mb-2">
-                                <h3 className="text-xl font-bold text-stone-800">
-                                  {product.name}
-                                </h3>
-                                {category === 'Todos' && (
-                                  <Badge variant="outline" className="text-xs text-stone-500">
-                                    {product.category}
-                                  </Badge>
-                                )}
-                              </div>
-                              {product.description && (
-                                <p className="text-stone-600 text-sm mb-4 line-clamp-2 flex-1">
-                                  {product.description}
-                                </p>
+                <TabsTrigger 
+                  key={category} 
+                  value={category}
+                  className="data-[state=active]:bg-amber-600 data-[state=active]:text-white bg-white border border-stone-200"
+                >
+                  {category}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+
+            {categories.map(category => (
+              <TabsContent key={category} value={category}>
+                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {products
+                    .filter(p => category === 'Todos' || p.category === category)
+                    .map(product => {
+                      const imageUrl = product.image_path 
+                        ? supabase.storage.from('product-images').getPublicUrl(product.image_path).data.publicUrl
+                        : 'https://images.unsplash.com/photo-1700952633119-fb79919833f6';
+                      
+                      return (
+                        <div
+                          key={product.id}
+                          className={`bg-white rounded-xl shadow-lg border border-stone-200 overflow-hidden transition-all flex flex-col ${isOutsideArea ? 'opacity-75 grayscale-[0.5]' : 'hover:shadow-xl'}`}
+                        >
+                          <div className="aspect-video bg-stone-200 overflow-hidden">
+                            <img
+                              src={imageUrl}
+                              alt={product.name}
+                              className="w-full h-full object-cover"
+                            />
+                          </div>
+                          <div className="p-4 flex flex-col flex-1">
+                            <div className="flex justify-between items-start mb-2">
+                              <h3 className="text-xl font-bold text-stone-800">
+                                {product.name}
+                              </h3>
+                              {category === 'Todos' && (
+                                <Badge variant="outline" className="text-xs text-stone-500">
+                                  {product.category}
+                                </Badge>
                               )}
-                              <div className="flex items-center justify-between mt-auto pt-4 border-t border-stone-100">
-                                <span className="text-2xl font-bold text-amber-600">
-                                  R$ {product.price?.toFixed(2)}
-                                </span>
-                                <Button 
-                                  onClick={() => addToCart(product)} 
-                                  className="gap-2"
-                                  disabled={!tableNumber || isOutsideArea}
-                                >
-                                  <Plus className="w-4 h-4" />
-                                  Adicionar
-                                </Button>
-                              </div>
+                            </div>
+                            {product.description && (
+                              <p className="text-stone-600 text-sm mb-4 line-clamp-2 flex-1">
+                                {product.description}
+                              </p>
+                            )}
+                            <div className="flex items-center justify-between mt-auto pt-4 border-t border-stone-100">
+                              <span className="text-2xl font-bold text-amber-600">
+                                R$ {product.price?.toFixed(2)}
+                              </span>
+                              <Button 
+                                onClick={() => addToCart(product)} 
+                                className="gap-2"
+                                disabled={!tableNumber || isOutsideArea}
+                              >
+                                <Plus className="w-4 h-4" />
+                                Adicionar
+                              </Button>
                             </div>
                           </div>
-                        );
-                      })}
+                        </div>
+                      );
+                    })}
+                </div>
+                {products.filter(p => category === 'Todos' || p.category === category).length === 0 && (
+                  <div className="text-center py-12">
+                    <p className="text-stone-500 text-lg">
+                      Nenhum produto disponível nesta categoria
+                    </p>
                   </div>
-                  {products.filter(p => category === 'Todos' || p.category === category).length === 0 && (
-                    <div className="text-center py-12">
-                      <p className="text-stone-500 text-lg">
-                        Nenhum produto disponível nesta categoria
-                      </p>
-                    </div>
-                  )}
-                </TabsContent>
-              ))}
-            </Tabs>
-          )}
+                )}
+              </TabsContent>
+            ))}
+          </Tabs>
         </div>
 
         <TableSelectionModal 

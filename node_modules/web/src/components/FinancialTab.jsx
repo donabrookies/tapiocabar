@@ -9,6 +9,7 @@ import { useToast } from '@/hooks/use-toast';
 
 const FinancialTab = () => {
   const [comandas, setComandas] = useState([]);
+  const [orders, setOrders] = useState({}); // Mapa de orderId -> order
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState('hoje');
   const [customStartDate, setCustomStartDate] = useState('');
@@ -50,10 +51,29 @@ const FinancialTab = () => {
         query = query.eq('forma_pagamento', paymentFilter);
       }
 
-      const { data, error } = await query.order('data_pagamento', { ascending: false });
+      const { data: comandasData, error: comandasError } = await query.order('data_pagamento', { ascending: false });
 
-      if (error) throw error;
-      setComandas(data || []);
+      if (comandasError) throw comandasError;
+
+      // Buscar todos os pedidos relacionados
+      const allOrderIds = comandasData?.flatMap(c => c.orders_ids || []) || [];
+      if (allOrderIds.length > 0) {
+        const { data: ordersData, error: ordersError } = await supabase
+          .from('orders')
+          .select('*')
+          .in('id', allOrderIds);
+        if (ordersError) throw ordersError;
+
+        const ordersMap = {};
+        ordersData?.forEach(order => {
+          ordersMap[order.id] = order;
+        });
+        setOrders(ordersMap);
+      } else {
+        setOrders({});
+      }
+
+      setComandas(comandasData || []);
     } catch (error) {
       console.error('Error fetching financial data:', error);
       toast({
@@ -74,9 +94,27 @@ const FinancialTab = () => {
     return { totalRevenue, orderCount, averageTicket };
   }, [comandas]);
 
+  // Função para formatar itens de pedido de forma legível
+  const formatOrderItems = (order) => {
+    if (!order || !order.items) return '';
+    // Agrupar por nome para evitar repetição
+    const itemMap = {};
+    order.items.forEach(item => {
+      const key = item.name;
+      if (itemMap[key]) {
+        itemMap[key] += item.quantity;
+      } else {
+        itemMap[key] = item.quantity;
+      }
+    });
+    return Object.entries(itemMap)
+      .map(([name, qty]) => `${qty} ${name}${qty > 1 ? 's' : ''}`)
+      .join(', ');
+  };
+
   return (
     <div className="space-y-6">
-      {/* Filters */}
+      {/* Filters (igual) */}
       <div className="bg-white p-4 rounded-xl shadow-sm border border-stone-200 flex flex-wrap items-end gap-4">
         <div className="space-y-1 min-w-[200px]">
           <Label>Período</Label>
@@ -179,7 +217,7 @@ const FinancialTab = () => {
             </div>
           </div>
 
-          {/* Orders Table */}
+          {/* Tabela de comandas com detalhes */}
           <div className="bg-white rounded-xl shadow-sm border border-stone-200 overflow-hidden">
             <div className="p-6 border-b border-stone-200">
               <h3 className="text-lg font-bold text-stone-800">Histórico de Comandas Pagas</h3>
@@ -190,33 +228,67 @@ const FinancialTab = () => {
                   <tr>
                     <th className="px-6 py-3 font-medium">Data Pagamento</th>
                     <th className="px-6 py-3 font-medium">Mesa</th>
+                    <th className="px-6 py-3 font-medium">Cliente(s)</th>
+                    <th className="px-6 py-3 font-medium">Itens</th>
                     <th className="px-6 py-3 font-medium">Forma de Pagamento</th>
                     <th className="px-6 py-3 font-medium text-right">Valor Total</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-stone-200">
                   {comandas.length > 0 ? (
-                    comandas.map((comanda) => (
-                      <tr key={comanda.id} className="hover:bg-stone-50 transition-colors">
-                        <td className="px-6 py-4 text-stone-600">
-                          {comanda.data_pagamento ? new Date(comanda.data_pagamento).toLocaleString('pt-BR') : '-'}
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
-                            {comanda.table_number}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-stone-600">
-                          {comanda.forma_pagamento || '-'}
-                        </td>
-                        <td className="px-6 py-4 text-right font-bold text-stone-800">
-                          R$ {comanda.total_value?.toFixed(2) || '0.00'}
-                        </td>
-                      </tr>
-                    ))
+                    comandas.map((comanda) => {
+                      // Obter os pedidos desta comanda
+                      const comandaOrders = (comanda.orders_ids || [])
+                        .map(id => orders[id])
+                        .filter(Boolean);
+
+                      // Nomes dos clientes (único por pedido)
+                      const customerNames = [...new Set(comandaOrders.map(o => o.customer_name))].join(', ');
+
+                      // Itens agregados
+                      const itemsSummary = {};
+                      comandaOrders.forEach(order => {
+                        order.items?.forEach(item => {
+                          const key = item.name;
+                          if (itemsSummary[key]) {
+                            itemsSummary[key] += item.quantity;
+                          } else {
+                            itemsSummary[key] = item.quantity;
+                          }
+                        });
+                      });
+                      const itemsList = Object.entries(itemsSummary)
+                        .map(([name, qty]) => `${qty} ${name}${qty > 1 ? 's' : ''}`)
+                        .join(', ');
+
+                      return (
+                        <tr key={comanda.id} className="hover:bg-stone-50 transition-colors">
+                          <td className="px-6 py-4 text-stone-600">
+                            {comanda.data_pagamento ? new Date(comanda.data_pagamento).toLocaleString('pt-BR') : '-'}
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
+                              {comanda.table_number}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 font-medium text-stone-800">
+                            {customerNames || '-'}
+                          </td>
+                          <td className="px-6 py-4 text-stone-600 max-w-xs truncate" title={itemsList}>
+                            {itemsList || '-'}
+                          </td>
+                          <td className="px-6 py-4 text-stone-600">
+                            {comanda.forma_pagamento || '-'}
+                          </td>
+                          <td className="px-6 py-4 text-right font-bold text-stone-800">
+                            R$ {comanda.total_value?.toFixed(2)}
+                          </td>
+                        </tr>
+                      );
+                    })
                   ) : (
                     <tr>
-                      <td colSpan="4" className="px-6 py-8 text-center text-stone-500">
+                      <td colSpan="6" className="px-6 py-8 text-center text-stone-500">
                         Nenhuma comanda paga encontrada neste período.
                       </td>
                     </tr>

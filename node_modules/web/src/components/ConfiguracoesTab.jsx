@@ -1,28 +1,118 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/lib/supabaseClient';
-import { Save, MapPin, Loader2 } from 'lucide-react';
+import { Save, MapPin, Loader2, Map, Crosshair } from 'lucide-react';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+
+// Fix para ícones do Leaflet
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+});
 
 const ConfiguracoesTab = () => {
   const [configId, setConfigId] = useState(null);
   const [formData, setFormData] = useState({
     endereco: '',
-    latitude: 0,
-    longitude: 0,
+    latitude: -23.5505,
+    longitude: -46.6333,
     restricao_ativa: false,
     raio_metros: 100,
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [gettingLocation, setGettingLocation] = useState(false);
   const { toast } = useToast();
+  
+  const mapRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const markerRef = useRef(null);
+  const circleRef = useRef(null);
 
   useEffect(() => {
     fetchConfig();
   }, []);
+
+  useEffect(() => {
+    if (!loading && mapRef.current && !mapInstanceRef.current) {
+      initMap();
+    }
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, [loading]);
+
+  useEffect(() => {
+    if (mapInstanceRef.current && formData.restricao_ativa) {
+      updateMapMarker();
+    }
+  }, [formData.latitude, formData.longitude, formData.raio_metros, formData.restricao_ativa]);
+
+  const initMap = () => {
+    const map = L.map(mapRef.current).setView([formData.latitude, formData.longitude], 15);
+    
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    map.on('click', (e) => {
+      const { lat, lng } = e.latlng;
+      setFormData(prev => ({
+        ...prev,
+        latitude: lat,
+        longitude: lng
+      }));
+    });
+
+    mapInstanceRef.current = map;
+    updateMapMarker();
+  };
+
+  const updateMapMarker = () => {
+    if (!mapInstanceRef.current) return;
+
+    // Remove marcador e círculo anteriores
+    if (markerRef.current) markerRef.current.remove();
+    if (circleRef.current) circleRef.current.remove();
+
+    // Adiciona novo marcador
+    markerRef.current = L.marker([formData.latitude, formData.longitude], {
+      draggable: true
+    }).addTo(mapInstanceRef.current);
+
+    markerRef.current.on('dragend', (e) => {
+      const { lat, lng } = e.target.getLatLng();
+      setFormData(prev => ({
+        ...prev,
+        latitude: lat,
+        longitude: lng
+      }));
+    });
+
+    // Adiciona círculo do raio
+    if (formData.restricao_ativa && formData.raio_metros > 0) {
+      circleRef.current = L.circle([formData.latitude, formData.longitude], {
+        radius: formData.raio_metros,
+        color: '#f59e0b',
+        fillColor: '#f59e0b',
+        fillOpacity: 0.2,
+        weight: 2
+      }).addTo(mapInstanceRef.current);
+    }
+
+    // Centraliza o mapa no marcador
+    mapInstanceRef.current.setView([formData.latitude, formData.longitude]);
+  };
 
   const fetchConfig = async () => {
     try {
@@ -38,8 +128,8 @@ const ConfiguracoesTab = () => {
         setConfigId(data.id);
         setFormData({
           endereco: data.endereco || '',
-          latitude: data.latitude || 0,
-          longitude: data.longitude || 0,
+          latitude: data.latitude || -23.5505,
+          longitude: data.longitude || -46.6333,
           restricao_ativa: data.restricao_ativa || false,
           raio_metros: data.raio_metros || 100,
         });
@@ -66,6 +156,43 @@ const ConfiguracoesTab = () => {
 
   const handleSwitchChange = (checked) => {
     setFormData((prev) => ({ ...prev, restricao_ativa: checked }));
+  };
+
+  const getCurrentLocation = () => {
+    setGettingLocation(true);
+    if (!navigator.geolocation) {
+      toast({
+        title: "Erro",
+        description: "Geolocalização não é suportada pelo seu navegador.",
+        variant: "destructive"
+      });
+      setGettingLocation(false);
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setFormData(prev => ({
+          ...prev,
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude
+        }));
+        toast({
+          title: "Localização obtida!",
+          description: "Sua posição foi marcada no mapa.",
+        });
+        setGettingLocation(false);
+      },
+      (error) => {
+        console.error('Geolocation error:', error);
+        toast({
+          title: "Erro",
+          description: "Não foi possível obter sua localização. Verifique as permissões.",
+          variant: "destructive"
+        });
+        setGettingLocation(false);
+      }
+    );
   };
 
   const handleSave = async (e) => {
@@ -108,7 +235,7 @@ const ConfiguracoesTab = () => {
   }
 
   return (
-    <div className="bg-white rounded-xl shadow-lg border border-stone-200 p-6 max-w-3xl">
+    <div className="bg-white rounded-xl shadow-lg border border-stone-200 p-6">
       <h2 className="text-2xl font-bold text-stone-800 mb-6 flex items-center gap-2">
         <MapPin className="w-6 h-6 text-amber-600" />
         Configurações do Estabelecimento
@@ -119,13 +246,13 @@ const ConfiguracoesTab = () => {
           <div className="flex items-center justify-between">
             <div>
               <Label className="text-base font-semibold text-stone-800">Restrição de Área de Pedido</Label>
-              <p className="text-sm text-stone-500">Se ativo, clientes só poderão pedir se estiverem próximos ao local.</p>
+              <p className="text-sm text-stone-500">Se ativo, clientes só poderão pedir se estiverem dentro do raio definido.</p>
             </div>
             <Switch checked={formData.restricao_ativa} onCheckedChange={handleSwitchChange} />
           </div>
 
           {formData.restricao_ativa && (
-            <div className="pt-4 border-t border-stone-200 grid gap-4 sm:grid-cols-2">
+            <div className="pt-4 border-t border-stone-200 space-y-4">
               <div className="sm:col-span-2 space-y-2">
                 <Label htmlFor="endereco">Endereço do Local</Label>
                 <Input
@@ -137,47 +264,81 @@ const ConfiguracoesTab = () => {
                 />
               </div>
               
-              <div className="space-y-2">
-                <Label htmlFor="latitude">Latitude</Label>
-                <Input
-                  id="latitude"
-                  name="latitude"
-                  type="number"
-                  step="any"
-                  value={formData.latitude}
-                  onChange={handleChange}
-                  placeholder="-23.5505"
-                  required={formData.restricao_ativa}
-                />
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="latitude">Latitude</Label>
+                  <Input
+                    id="latitude"
+                    name="latitude"
+                    type="number"
+                    step="any"
+                    value={formData.latitude}
+                    onChange={handleChange}
+                    placeholder="-23.5505"
+                    required={formData.restricao_ativa}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="longitude">Longitude</Label>
+                  <Input
+                    id="longitude"
+                    name="longitude"
+                    type="number"
+                    step="any"
+                    value={formData.longitude}
+                    onChange={handleChange}
+                    placeholder="-46.6333"
+                    required={formData.restricao_ativa}
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <Button 
+                  type="button" 
+                  variant="outline" 
+                  onClick={getCurrentLocation}
+                  disabled={gettingLocation}
+                  className="gap-2"
+                >
+                  {gettingLocation ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Crosshair className="w-4 h-4" />
+                  )}
+                  Usar minha localização atual
+                </Button>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="longitude">Longitude</Label>
-                <Input
-                  id="longitude"
-                  name="longitude"
-                  type="number"
-                  step="any"
-                  value={formData.longitude}
-                  onChange={handleChange}
-                  placeholder="-46.6333"
-                  required={formData.restricao_ativa}
-                />
-              </div>
-
-              <div className="sm:col-span-2 space-y-2">
                 <Label htmlFor="raio_metros">Raio de Atendimento (em metros)</Label>
                 <Input
                   id="raio_metros"
                   name="raio_metros"
                   type="number"
                   min="10"
+                  max="5000"
                   value={formData.raio_metros}
                   onChange={handleChange}
                   placeholder="Ex: 100"
                   required={formData.restricao_ativa}
                 />
-                <p className="text-xs text-stone-500">Distância máxima permitida para o cliente fazer um pedido.</p>
+                <p className="text-xs text-stone-500">
+                  Distância máxima permitida para o cliente fazer um pedido. Clique no mapa para ajustar a posição ou arraste o marcador.
+                </p>
+              </div>
+
+              <div className="mt-4 border rounded-lg overflow-hidden h-96">
+                <div ref={mapRef} className="w-full h-full" />
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
+                <p className="font-semibold mb-1">💡 Dica:</p>
+                <p>• Clique no mapa para posicionar o marcador</p>
+                <p>• Arraste o marcador para ajustar a posição</p>
+                <p>• O círculo mostra a área de atendimento</p>
+                <p>• Use "Usar minha localização atual" para marcar onde você está agora</p>
               </div>
             </div>
           )}

@@ -3,6 +3,7 @@ import { Helmet } from 'react-helmet';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import Header from '@/components/Header.jsx';
 import ProductForm from '@/components/ProductForm.jsx';
 import TableManagementTab from '@/components/TableManagementTab.jsx';
@@ -10,7 +11,7 @@ import FinancialTab from '@/components/FinancialTab.jsx';
 import WaiterTab from '@/components/WaiterTab.jsx';
 import ConfiguracoesTab from '@/components/ConfiguracoesTab.jsx';
 import PaymentModal from '@/components/PaymentModal.jsx';
-import { Plus, Edit, Trash2, Check, X, CreditCard } from 'lucide-react';
+import { Plus, Edit, Trash2, Check, X, CreditCard, Eye } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/lib/supabaseClient';
 import { useNotificationSound } from '@/hooks/useNotificationSound.js';
@@ -23,6 +24,8 @@ const AdminDashboard = () => {
   const [editingProduct, setEditingProduct] = useState(null);
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [selectedComanda, setSelectedComanda] = useState(null);
+  const [viewComandaOpen, setViewComandaOpen] = useState(false);
+  const [selectedComandaDetails, setSelectedComandaDetails] = useState(null);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
   const { playNotificationSound } = useNotificationSound();
@@ -41,7 +44,7 @@ const AdminDashboard = () => {
             playNotificationSound();
             toast({
               title: "Novo Pedido!",
-              description: `Mesa ${payload.new.table_number} enviou um pedido.`,
+              description: `Mesa ${payload.new.table_number} - ${payload.new.customer_name}`,
             });
           } else if (payload.eventType === 'UPDATE') {
             setOrders((prev) =>
@@ -61,14 +64,12 @@ const AdminDashboard = () => {
         { event: '*', schema: 'public', table: 'comandas' },
         (payload) => {
           if (payload.eventType === 'INSERT') {
-            setComandas((prev) => [payload.new, ...prev]);
+            fetchComandaDetails(payload.new);
           } else if (payload.eventType === 'UPDATE') {
             if (payload.new.paid) {
               setComandas((prev) => prev.filter((c) => c.id !== payload.new.id));
             } else {
-              setComandas((prev) =>
-                prev.map((c) => (c.id === payload.new.id ? payload.new : c))
-              );
+              fetchComandaDetails(payload.new);
             }
           } else if (payload.eventType === 'DELETE') {
             setComandas((prev) => prev.filter((c) => c.id !== payload.old.id));
@@ -82,6 +83,30 @@ const AdminDashboard = () => {
       comandasSubscription.unsubscribe();
     };
   }, [playNotificationSound, toast]);
+
+  const fetchComandaDetails = async (comanda) => {
+    try {
+      // Buscar os pedidos desta comanda
+      const { data: ordersData, error } = await supabase
+        .from('orders')
+        .select('*')
+        .in('id', comanda.orders_ids || []);
+
+      if (error) throw error;
+
+      const comandaCompleta = {
+        ...comanda,
+        orders: ordersData || []
+      };
+
+      setComandas((prev) => {
+        const filtered = prev.filter(c => c.id !== comanda.id);
+        return [comandaCompleta, ...filtered];
+      });
+    } catch (error) {
+      console.error('Error fetching comanda details:', error);
+    }
+  };
 
   const fetchAllData = async () => {
     try {
@@ -97,7 +122,22 @@ const AdminDashboard = () => {
 
       setProducts(productsData.data || []);
       setOrders(ordersData.data || []);
-      setComandas(comandasData.data || []);
+
+      // Buscar detalhes de cada comanda
+      const comandasComDetalhes = await Promise.all(
+        (comandasData.data || []).map(async (comanda) => {
+          const { data: ordersData } = await supabase
+            .from('orders')
+            .select('*')
+            .in('id', comanda.orders_ids || []);
+          return {
+            ...comanda,
+            orders: ordersData || []
+          };
+        })
+      );
+
+      setComandas(comandasComDetalhes);
     } catch (error) {
       console.error('Error fetching data:', error);
       toast({
@@ -227,6 +267,35 @@ const AdminDashboard = () => {
     setPaymentModalOpen(true);
   };
 
+  const viewComandaDetails = (comanda) => {
+    setSelectedComandaDetails(comanda);
+    setViewComandaOpen(true);
+  };
+
+  // Função para agrupar itens iguais
+  const agruparItens = (orders) => {
+    const itensAgrupados = {};
+    
+    orders.forEach(order => {
+      order.items?.forEach(item => {
+        const chave = `${item.name}`;
+        if (itensAgrupados[chave]) {
+          itensAgrupados[chave].quantidade += item.quantity;
+          itensAgrupados[chave].total += item.price * item.quantity;
+        } else {
+          itensAgrupados[chave] = {
+            nome: item.name,
+            quantidade: item.quantity,
+            precoUnitario: item.price,
+            total: item.price * item.quantity
+          };
+        }
+      });
+    });
+
+    return Object.values(itensAgrupados);
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-stone-50">
@@ -339,28 +408,61 @@ const AdminDashboard = () => {
                 <h2 className="text-2xl font-bold text-stone-800 mb-6">Comandas Ativas por Mesa</h2>
 
                 <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {comandas.filter(c => !c.paid).map(comanda => (
-                    <div key={comanda.id} className="p-5 bg-stone-50 rounded-xl border border-stone-200 shadow-sm flex flex-col">
-                      <div className="flex items-center justify-between mb-4">
-                        <Badge className="text-lg px-3 py-1 bg-stone-800">Mesa {comanda.table_number}</Badge>
-                        <p className="text-sm font-medium text-stone-500">
-                          {comanda.orders_ids?.length || 0} pedido(s)
-                        </p>
-                      </div>
-                      
-                      <div className="mb-6 flex-1">
-                        <p className="text-sm text-stone-500 mb-1">Total da Comanda</p>
-                        <p className="text-3xl font-bold text-amber-600">
-                          R$ {comanda.total_value?.toFixed(2)}
-                        </p>
-                      </div>
+                  {comandas.filter(c => !c.paid).map(comanda => {
+                    const itensAgrupados = agruparItens(comanda.orders || []);
+                    const clientes = [...new Set((comanda.orders || []).map(o => o.customer_name))].join(', ');
+                    
+                    return (
+                      <div key={comanda.id} className="p-5 bg-stone-50 rounded-xl border border-stone-200 shadow-sm flex flex-col">
+                        <div className="flex items-center justify-between mb-4">
+                          <Badge className="text-lg px-3 py-1 bg-stone-800">Mesa {comanda.table_number}</Badge>
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => viewComandaDetails(comanda)}
+                              className="h-8 w-8 p-0"
+                            >
+                              <Eye className="w-4 h-4" />
+                            </Button>
+                            <p className="text-sm font-medium text-stone-500">
+                              {comanda.orders?.length || 0} pedido(s)
+                            </p>
+                          </div>
+                        </div>
+                        
+                        {clientes && (
+                          <p className="text-sm text-stone-600 mb-2">
+                            <span className="font-semibold">Cliente(s):</span> {clientes}
+                          </p>
+                        )}
 
-                      <Button onClick={() => openPaymentModal(comanda)} className="w-full gap-2 bg-green-600 hover:bg-green-700 text-white">
-                        <CreditCard className="w-4 h-4" />
-                        Marcar como Pago
-                      </Button>
-                    </div>
-                  ))}
+                        <div className="mb-4 flex-1 max-h-32 overflow-y-auto">
+                          <p className="text-sm font-semibold text-stone-700 mb-1">Itens:</p>
+                          <ul className="text-sm space-y-1">
+                            {itensAgrupados.map((item, idx) => (
+                              <li key={idx} className="flex justify-between text-stone-600">
+                                <span>{item.quantidade}x {item.nome}</span>
+                                <span className="font-medium text-stone-800">R$ {item.total.toFixed(2)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <div className="mb-4">
+                          <p className="text-sm text-stone-500 mb-1">Total da Comanda</p>
+                          <p className="text-3xl font-bold text-amber-600">
+                            R$ {comanda.total_value?.toFixed(2)}
+                          </p>
+                        </div>
+
+                        <Button onClick={() => openPaymentModal(comanda)} className="w-full gap-2 bg-green-600 hover:bg-green-700 text-white">
+                          <CreditCard className="w-4 h-4" />
+                          Marcar como Pago
+                        </Button>
+                      </div>
+                    );
+                  })}
 
                   {comandas.filter(c => !c.paid).length === 0 && (
                     <div className="col-span-full text-center py-12">
@@ -465,6 +567,80 @@ const AdminDashboard = () => {
           comanda={selectedComanda}
           onSuccess={fetchAllData}
         />
+
+        {/* Modal de Detalhes da Comanda */}
+        <Dialog open={viewComandaOpen} onOpenChange={setViewComandaOpen}>
+          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle className="text-2xl font-bold text-stone-800">
+                Detalhes da Comanda - Mesa {selectedComandaDetails?.table_number}
+              </DialogTitle>
+            </DialogHeader>
+
+            {selectedComandaDetails && (
+              <div className="space-y-6">
+                {/* Informações dos clientes */}
+                <div className="bg-stone-50 p-4 rounded-lg border border-stone-200">
+                  <h3 className="font-semibold text-stone-800 mb-3">Clientes na Mesa:</h3>
+                  <div className="space-y-2">
+                    {selectedComandaDetails.orders?.map((order, idx) => (
+                      <div key={idx} className="flex items-center gap-2 text-stone-700">
+                        <span className="w-2 h-2 bg-amber-500 rounded-full"></span>
+                        <span className="font-medium">{order.customer_name}</span>
+                        <span className="text-xs text-stone-500">
+                          {new Date(order.created_at).toLocaleTimeString('pt-BR')}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Lista de itens agrupados */}
+                <div className="bg-stone-50 p-4 rounded-lg border border-stone-200">
+                  <h3 className="font-semibold text-stone-800 mb-3">Itens Pedidos:</h3>
+                  <div className="space-y-2">
+                    {agruparItens(selectedComandaDetails.orders || []).map((item, idx) => (
+                      <div key={idx} className="flex justify-between items-center py-2 border-b border-stone-200 last:border-0">
+                        <div>
+                          <span className="font-bold text-lg text-stone-800">{item.quantidade}x</span>
+                          <span className="ml-2 text-stone-700">{item.nome}</span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-sm text-stone-500 block">R$ {item.precoUnitario.toFixed(2)} cada</span>
+                          <span className="font-semibold text-amber-600">R$ {item.total.toFixed(2)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Total */}
+                <div className="bg-amber-50 p-4 rounded-lg border border-amber-200">
+                  <div className="flex justify-between items-center">
+                    <span className="text-lg font-semibold text-stone-800">Total da Comanda:</span>
+                    <span className="text-2xl font-bold text-amber-600">
+                      R$ {selectedComandaDetails.total_value?.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Observações */}
+                {selectedComandaDetails.orders?.some(o => o.notes) && (
+                  <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                    <h3 className="font-semibold text-blue-800 mb-2">Observações:</h3>
+                    {selectedComandaDetails.orders.map((order, idx) => (
+                      order.notes && (
+                        <div key={idx} className="text-sm text-blue-700 mb-1">
+                          <span className="font-medium">{order.customer_name}:</span> {order.notes}
+                        </div>
+                      )
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </DialogContent>
+        </Dialog>
       </div>
     </>
   );
