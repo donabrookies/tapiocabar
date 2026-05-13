@@ -1,5 +1,5 @@
 {
-  "buildCommand": "npm run build --prefix apps/web",
+  "buildCommand": "cd apps/web && npx vite build --outDir ../../dist/apps/web",
   "outputDirectory": "dist/apps/web",
   "installCommand": "npm install",
   "framework": null,
